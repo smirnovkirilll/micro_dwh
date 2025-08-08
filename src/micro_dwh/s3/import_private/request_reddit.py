@@ -13,27 +13,26 @@ import os
 import requests
 import requests.auth
 import time
-from datetime import datetime
-from table_transfer.helpers import upload_object_to_s3
+from table_transfer.helpers import upload_object_to_s3, timestamp_to_dttm
 
 
-SUBREDDIT = 'dataengineering'
 LISTING = 'new'  # controversial, best, hot, new, random, rising, top
 LIMIT = 100
 TIMEFRAME = 'month'  # hour, day, week, month, year, all
-DTTM_FORMAT = '%Y-%m-%d %H:%M:%S'
+SUBREDDIT_LIST = os.environ.get('SUBREDDIT_LIST', '').split(',')
 
 
-logger = logging.getLogger('logging reddit_request')
+logger = logging.getLogger('logging request_reddit')
 logger.setLevel(logging.INFO)
 
 
-def _format_dttm(seconds: float):
-    return datetime.fromtimestamp(seconds).strftime(DTTM_FORMAT)
-
-
 def get_reddit_response_no_auth(
-        subreddit: str, listing: str, limit: int, timeframe: str, before: str=None, after: str=None,
+        subreddit: str,
+        listing: str,
+        limit: int,
+        timeframe: str,
+        before: str = None,
+        after: str = None,
 ) -> dict:
     """
     - simplest request, if breaks => add authorisation
@@ -73,20 +72,20 @@ def add_metadata(response: dict) -> dict:
     response['_request_duration_sec'] = response['_request_end_time'] - response['_request_start_time']
     response['_max_thing_name'] = response['data']['children'][0]['data']['name']
     response['_max_thing_utc_created'] = response['data']['children'][0]['data']['created_utc']
-    response['_max_thing_utc_created_dttm'] = _format_dttm(response['_max_thing_utc_created'])
+    response['_max_thing_utc_created_dttm'] = timestamp_to_dttm(response['_max_thing_utc_created'])
     response['_min_thing_name'] = response['data']['children'][-1]['data']['name']
     response['_min_thing_utc_created'] = response['data']['children'][-1]['data']['created_utc']
-    response['_min_thing_utc_created_dttm'] = _format_dttm(response['_min_thing_utc_created'])
+    response['_min_thing_utc_created_dttm'] = timestamp_to_dttm(response['_min_thing_utc_created'])
     response['_things_given_cnt'] = len(response['data']['children'])
     return response
 
 
 def _prepare_file_name(
         response: dict,
-        add_request_time: bool=False,
-        compress: bool=False,
-        s3: bool=False,
-        hist: bool=False,
+        add_request_time: bool = False,
+        compress: bool = False,
+        s3: bool = False,
+        hist: bool = False,
 ) -> str:
     """
     for s3 storage crucial to save subreddit in separate kinda-directory, that's why using /
@@ -104,7 +103,7 @@ def _prepare_file_name(
         suffix_separator = '__'
 
     if add_request_time:
-        request_time = '__' + _format_dttm(response['_request_start_time'])
+        request_time = '__' + timestamp_to_dttm(response['_request_start_time'])
     else:
         request_time = ''
 
@@ -119,7 +118,8 @@ def _prepare_file_name(
         request_time + '.json' + postfix
 
 
-def _get_data_obj(some_dict: dict, compress: bool=True) -> bytes:
+def _get_data_obj(some_dict: dict, compress: bool = True) -> bytes:
+    # TODO: move to table_transfer.helpers
 
     data = json.dumps(some_dict).encode('utf-8')
     if compress:
@@ -128,7 +128,13 @@ def _get_data_obj(some_dict: dict, compress: bool=True) -> bytes:
     return data
 
 
-def save_dict_locally(response: dict, add_request_time: bool=True, compress: bool=True, hist=False) -> str:
+def save_dict_locally(
+        response: dict,
+        add_request_time: bool = True,
+        compress: bool = True,
+        hist: bool = False,
+) -> str:
+    # TODO: replace with TableTransfer
 
     file_name = _prepare_file_name(response, add_request_time, compress=compress, hist=hist)
     data = _get_data_obj(response, compress)
@@ -139,7 +145,31 @@ def save_dict_locally(response: dict, add_request_time: bool=True, compress: boo
     return file_name
 
 
-def upload_dict_to_s3(response: dict, add_request_time: bool=True, compress: bool=True, hist=False) -> str:
+def request_and_save_response(
+        subreddit: str = None,
+        listing: str = LISTING,
+        limit: int = LIMIT,
+        timeframe: str = TIMEFRAME,
+        compress=True,
+        s3=True,
+        hist=False,
+) -> str:
+    # TODO: replace with TableTransfer
+
+    response = get_reddit_response_no_auth(subreddit, listing, limit, timeframe)
+    full_response = add_metadata(response)
+    save_func = upload_dict_to_s3 if s3 else save_dict_locally
+
+    return save_func(full_response, compress=compress, hist=hist)
+
+
+def upload_dict_to_s3(
+        response: dict,
+        add_request_time: bool = True,
+        compress: bool = True,
+        hist=False,
+) -> str:
+    # TODO: replace with TableTransfer
 
     bucket = os.environ['S3_BUCKET']
     file_name = _prepare_file_name(response, add_request_time, compress=compress, s3=True, hist=hist)
@@ -149,25 +179,11 @@ def upload_dict_to_s3(response: dict, add_request_time: bool=True, compress: boo
     return file_name
 
 
-def request_and_save_response(
-        subreddit: str=SUBREDDIT,
-        listing: str=LISTING,
-        limit: int=LIMIT,
-        timeframe: str=TIMEFRAME,
-        compress=True,
-        s3=True,
-        hist=False,
-) -> str:
-
-    response = get_reddit_response_no_auth(subreddit, listing, limit, timeframe)
-    full_response = add_metadata(response)
-    save_func = upload_dict_to_s3 if s3 else save_dict_locally
-
-    return save_func(full_response, compress=compress, hist=hist)
+def main():
+    logging.basicConfig(level=logging.INFO)
+    for subreddit in SUBREDDIT_LIST:
+        request_and_save_response(subreddit)
 
 
 if __name__ == '__main__':
-    # note: debug only
-    logging.basicConfig(level=logging.INFO)
-    for subreddit in os.environ['SUBREDDIT_LIST'].split(','):
-        request_and_save_response(subreddit)
+    main()
